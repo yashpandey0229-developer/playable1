@@ -11,14 +11,22 @@ export class PlayablesAdapter implements IPlayablesAdapter {
   private pauseListeners: Array<() => void> = [];
   private resumeListeners: Array<() => void> = [];
   private hasLoadedBeforeSave = false;
+  private hasCalledFirstFrame = false;
+  private hasCalledGameReady = false;
+  private isAdRequestPending = false;
+
+  private get ytgame() {
+    return typeof window !== 'undefined' ? window.ytgame : undefined;
+  }
 
   async init(): Promise<void> {
-    if (typeof window !== 'undefined' && window.ytgame) {
+    const yt = this.ytgame;
+    if (yt) {
       console.log('[PlayablesAdapter] YouTube Playables SDK detected.');
 
       // Register system audio listener
       try {
-        window.ytgame.system.onAudioEnabledChange((enabled: boolean) => {
+        yt.system.onAudioEnabledChange((enabled: boolean) => {
           console.log('[PlayablesAdapter] SDK onAudioEnabledChange:', enabled);
           this.audioListeners.forEach(fn => fn(enabled));
         });
@@ -28,7 +36,7 @@ export class PlayablesAdapter implements IPlayablesAdapter {
 
       // Register pause listener
       try {
-        window.ytgame.system.onPause(() => {
+        yt.system.onPause(() => {
           console.log('[PlayablesAdapter] SDK onPause triggered');
           this.pauseListeners.forEach(fn => fn());
         });
@@ -38,7 +46,7 @@ export class PlayablesAdapter implements IPlayablesAdapter {
 
       // Register resume listener
       try {
-        window.ytgame.system.onResume(() => {
+        yt.system.onResume(() => {
           console.log('[PlayablesAdapter] SDK onResume triggered');
           this.resumeListeners.forEach(fn => fn());
         });
@@ -51,10 +59,14 @@ export class PlayablesAdapter implements IPlayablesAdapter {
   }
 
   firstFrameReady(): void {
-    if (window.ytgame?.game?.firstFrameReady) {
+    if (this.hasCalledFirstFrame) return;
+    this.hasCalledFirstFrame = true;
+
+    const yt = this.ytgame;
+    if (yt?.game?.firstFrameReady) {
       try {
         console.log('[PlayablesAdapter] Calling ytgame.game.firstFrameReady()');
-        window.ytgame.game.firstFrameReady();
+        yt.game.firstFrameReady();
       } catch (e) {
         console.error('[PlayablesAdapter] firstFrameReady error:', e);
       }
@@ -62,10 +74,14 @@ export class PlayablesAdapter implements IPlayablesAdapter {
   }
 
   gameReady(): void {
-    if (window.ytgame?.game?.gameReady) {
+    if (this.hasCalledGameReady) return;
+    this.hasCalledGameReady = true;
+
+    const yt = this.ytgame;
+    if (yt?.game?.gameReady) {
       try {
         console.log('[PlayablesAdapter] Calling ytgame.game.gameReady()');
-        window.ytgame.game.gameReady();
+        yt.game.gameReady();
       } catch (e) {
         console.error('[PlayablesAdapter] gameReady error:', e);
       }
@@ -74,19 +90,20 @@ export class PlayablesAdapter implements IPlayablesAdapter {
 
   async loadData(): Promise<GameSaveData | null> {
     this.hasLoadedBeforeSave = true;
-    if (!window.ytgame?.game?.loadData) {
+    const yt = this.ytgame;
+    if (!yt?.game?.loadData) {
       console.warn('[PlayablesAdapter] loadData not available on ytgame.');
       return null;
     }
 
     try {
       console.log('[PlayablesAdapter] Calling ytgame.game.loadData()');
-      const loadPromise = window.ytgame.game.loadData();
+      const loadPromise = yt.game.loadData();
       const timeoutPromise = new Promise<null>((resolve) => {
         setTimeout(() => {
-          console.warn('[PlayablesAdapter] ytgame.game.loadData() timed out after 1500ms.');
+          console.warn('[PlayablesAdapter] ytgame.game.loadData() timed out after 8000ms.');
           resolve(null);
-        }, 1500);
+        }, 8000);
       });
 
       const raw = await Promise.race([loadPromise, timeoutPromise]);
@@ -110,11 +127,6 @@ export class PlayablesAdapter implements IPlayablesAdapter {
       console.warn('[PlayablesAdapter] Save requested before initial loadData. Ensuring load check first.');
     }
 
-    if (!window.ytgame?.game?.saveData) {
-      console.warn('[PlayablesAdapter] saveData not available on ytgame.');
-      return false;
-    }
-
     try {
       const payload = JSON.stringify(data);
       // Ensure payload byte size is within YouTube Playables 3 MiB limit
@@ -123,17 +135,29 @@ export class PlayablesAdapter implements IPlayablesAdapter {
         console.error('[PlayablesAdapter] Save data exceeds 3 MiB limit!');
         return false;
       }
-      const savePromise = window.ytgame.game.saveData(payload);
+
+      const yt = this.ytgame;
+      if (!yt?.game?.saveData) {
+        console.warn('[PlayablesAdapter] saveData not available on ytgame.');
+        return false;
+      }
+
+      let timedOut = false;
+      const savePromise = Promise.resolve(yt.game.saveData(payload)).then(() => true);
       const timeoutPromise = new Promise<boolean>((resolve) => {
         setTimeout(() => {
-          console.warn('[PlayablesAdapter] ytgame.game.saveData() timed out after 1500ms.');
-          resolve(true);
-        }, 1500);
+          timedOut = true;
+          console.warn('[PlayablesAdapter] ytgame.game.saveData() timed out after 8000ms.');
+          resolve(false);
+        }, 8000);
       });
 
-      await Promise.race([savePromise, timeoutPromise]);
-      console.log('[PlayablesAdapter] Cloud save operation finished.');
-      return true;
+      const outcome = await Promise.race([savePromise, timeoutPromise]);
+      if (outcome && !timedOut) {
+        console.log('[PlayablesAdapter] Cloud save operation completed successfully.');
+        return true;
+      }
+      return false;
     } catch (e) {
       console.error('[PlayablesAdapter] Error saving data to YouTube SDK:', e);
       return false;
@@ -141,19 +165,23 @@ export class PlayablesAdapter implements IPlayablesAdapter {
   }
 
   async sendScore(score: number): Promise<boolean> {
-    if (!window.ytgame?.engagement?.sendScore) {
+    const yt = this.ytgame;
+    if (!yt?.engagement?.sendScore) {
       console.warn('[PlayablesAdapter] sendScore not available on ytgame.');
       return false;
     }
 
     try {
       console.log(`[PlayablesAdapter] Sending score ${score} to YouTube`);
-      const scorePromise = window.ytgame.engagement.sendScore({ value: Math.max(0, Math.floor(score)) });
+      const scorePromise = Promise.resolve(yt.engagement.sendScore({ value: Math.max(0, Math.floor(score)) })).then(() => true);
       const timeoutPromise = new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(true), 1500);
+        setTimeout(() => {
+          console.warn('[PlayablesAdapter] ytgame.engagement.sendScore timed out after 8000ms.');
+          resolve(false);
+        }, 8000);
       });
-      await Promise.race([scorePromise, timeoutPromise]);
-      return true;
+      const success = await Promise.race([scorePromise, timeoutPromise]);
+      return Boolean(success);
     } catch (e) {
       console.error('[PlayablesAdapter] Error sending score to YouTube SDK:', e);
       return false;
@@ -161,9 +189,10 @@ export class PlayablesAdapter implements IPlayablesAdapter {
   }
 
   isAudioEnabled(): boolean {
-    if (window.ytgame?.system?.isAudioEnabled) {
+    const yt = this.ytgame;
+    if (yt?.system?.isAudioEnabled) {
       try {
-        return window.ytgame.system.isAudioEnabled();
+        return yt.system.isAudioEnabled();
       } catch (e) {
         console.error('[PlayablesAdapter] isAudioEnabled error:', e);
       }
@@ -193,19 +222,28 @@ export class PlayablesAdapter implements IPlayablesAdapter {
   }
 
   async requestRewardedAd(rewardId: string): Promise<boolean> {
-    if (!window.ytgame?.ads?.requestRewardedAd) {
+    if (this.isAdRequestPending) {
+      console.warn('[PlayablesAdapter] Rewarded ad request already in progress. Ignoring duplicate.');
+      return false;
+    }
+
+    const yt = this.ytgame;
+    if (!yt?.ads?.requestRewardedAd) {
       console.warn('[PlayablesAdapter] Rewarded ads not supported in this environment.');
       return false;
     }
 
+    this.isAdRequestPending = true;
     try {
       console.log(`[PlayablesAdapter] Requesting rewarded ad with ID "${rewardId}"`);
-      const earned = await window.ytgame.ads.requestRewardedAd(rewardId);
+      const earned = await yt.ads.requestRewardedAd(rewardId);
       console.log('[PlayablesAdapter] Rewarded ad outcome:', earned);
       return Boolean(earned);
     } catch (e) {
       console.error('[PlayablesAdapter] Error requesting rewarded ad:', e);
       return false;
+    } finally {
+      this.isAdRequestPending = false;
     }
   }
 }

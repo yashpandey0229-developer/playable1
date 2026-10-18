@@ -8,7 +8,8 @@ export class SaveManager {
   private adapter: IPlayablesAdapter;
   private data: GameSaveData;
   private isLoaded = false;
-  private isSavePending = false;
+  private isSaveRunning = false;
+  private queuedSaveResolvers: Array<(success: boolean) => void> = [];
 
   private constructor(adapter: IPlayablesAdapter) {
     this.adapter = adapter;
@@ -21,6 +22,10 @@ export class SaveManager {
       SaveManager.instance = new SaveManager(adapter);
     }
     return SaveManager.instance;
+  }
+
+  static resetInstance(): void {
+    SaveManager.instance = null;
   }
 
   getDefaultData(): GameSaveData {
@@ -55,39 +60,72 @@ export class SaveManager {
     }
   }
 
-  private validateAndMigrate(raw: any): GameSaveData {
+  validateAndMigrate(raw: any): GameSaveData {
     const defaults = this.getDefaultData();
     if (!raw || typeof raw !== 'object') return defaults;
 
     const data: GameSaveData = {
       version: typeof raw.version === 'number' ? raw.version : CURRENT_SAVE_VERSION,
-      unlockedLevels: typeof raw.unlockedLevels === 'number' && raw.unlockedLevels >= 1 ? Math.min(30, Math.max(1, Math.floor(raw.unlockedLevels))) : 1,
-      highScore: typeof raw.highScore === 'number' && raw.highScore >= 0 ? raw.highScore : defaults.highScore,
-      coins: typeof raw.coins === 'number' && raw.coins >= 0 ? raw.coins : defaults.coins,
-      stars: typeof raw.stars === 'object' && raw.stars !== null ? raw.stars : {},
-      levelScores: typeof raw.levelScores === 'object' && raw.levelScores !== null ? raw.levelScores : {},
-      unlockedSkins: Array.isArray(raw.unlockedSkins) && raw.unlockedSkins.length > 0 ? raw.unlockedSkins : [DEFAULT_SKIN_ID],
+      unlockedLevels: typeof raw.unlockedLevels === 'number' && !isNaN(raw.unlockedLevels)
+        ? Math.min(30, Math.max(1, Math.floor(raw.unlockedLevels)))
+        : 1,
+      highScore: typeof raw.highScore === 'number' && raw.highScore >= 0 ? Math.floor(raw.highScore) : defaults.highScore,
+      coins: typeof raw.coins === 'number' && raw.coins >= 0 ? Math.floor(raw.coins) : defaults.coins,
+      stars: {},
+      levelScores: {},
+      unlockedSkins: Array.isArray(raw.unlockedSkins) && raw.unlockedSkins.length > 0 ? [...raw.unlockedSkins] : [DEFAULT_SKIN_ID],
       selectedSkin: typeof raw.selectedSkin === 'string' ? raw.selectedSkin : DEFAULT_SKIN_ID,
       soundEnabled: typeof raw.soundEnabled === 'boolean' ? raw.soundEnabled : true,
       lastDailyDate: typeof raw.lastDailyDate === 'string' ? raw.lastDailyDate : undefined,
       dailyCompleted: typeof raw.dailyCompleted === 'boolean' ? raw.dailyCompleted : false
     };
 
+    // Validate stars map: keys 1..30, values 1..3
+    if (raw.stars && typeof raw.stars === 'object' && !Array.isArray(raw.stars)) {
+      for (const [k, v] of Object.entries(raw.stars)) {
+        const numK = Number(k);
+        const numV = Number(v);
+        if (!isNaN(numK) && !isNaN(numV) && numK >= 1 && numK <= 30 && numV >= 1 && numV <= 3) {
+          data.stars[numK] = Math.floor(numV);
+        }
+      }
+    }
+
+    // Validate levelScores map: keys 1..30, values >= 0
+    if (raw.levelScores && typeof raw.levelScores === 'object' && !Array.isArray(raw.levelScores)) {
+      for (const [k, v] of Object.entries(raw.levelScores)) {
+        const numK = Number(k);
+        const numV = Number(v);
+        if (!isNaN(numK) && !isNaN(numV) && numK >= 1 && numK <= 30 && numV >= 0) {
+          data.levelScores[numK] = Math.floor(numV);
+        }
+      }
+    }
+
     // Ensure default skin is always in unlocked list
     if (!data.unlockedSkins.includes(DEFAULT_SKIN_ID)) {
       data.unlockedSkins.push(DEFAULT_SKIN_ID);
     }
 
-    // Auto-repair saves previously affected by unlockedLevels: 30 bug
+    // Ensure selected skin is valid and unlocked
+    if (!data.unlockedSkins.includes(data.selectedSkin)) {
+      data.selectedSkin = DEFAULT_SKIN_ID;
+    }
+
+    // Progression sanity check & migration:
+    // If user has stars in completed levels, unlockedLevels must at LEAST be highestCompleted + 1
     const completedLevelIds = Object.keys(data.stars)
       .map(Number)
       .filter(n => (data.stars[n] || 0) > 0);
 
     if (completedLevelIds.length === 0) {
-      data.unlockedLevels = 1;
+      // Fix old bug where fresh accounts had unlockedLevels: 30
+      if (raw.unlockedLevels === 30 || typeof raw.unlockedLevels !== 'number') {
+        data.unlockedLevels = 1;
+      }
     } else {
       const highestCompleted = Math.max(0, ...completedLevelIds);
-      data.unlockedLevels = Math.min(30, Math.max(1, highestCompleted + 1));
+      data.unlockedLevels = Math.min(30, Math.max(data.unlockedLevels, highestCompleted + 1));
     }
 
     return data;
@@ -99,20 +137,34 @@ export class SaveManager {
       return false;
     }
 
-    if (this.isSavePending) {
-      return true;
+    // If a save operation is already in flight, queue this request
+    if (this.isSaveRunning) {
+      return new Promise<boolean>((resolve) => {
+        this.queuedSaveResolvers.push(resolve);
+      });
     }
 
-    this.isSavePending = true;
+    this.isSaveRunning = true;
+    let success = false;
     try {
-      const success = await this.adapter.saveData(this.data);
-      return success;
+      success = await this.adapter.saveData(this.data);
     } catch (e) {
       console.error('[SaveManager] Cloud save exception:', e);
-      return false;
+      success = false;
     } finally {
-      this.isSavePending = false;
+      this.isSaveRunning = false;
+
+      // If newer save requests were queued while saving, execute a follow-up save with latest data
+      if (this.queuedSaveResolvers.length > 0) {
+        const resolvers = this.queuedSaveResolvers;
+        this.queuedSaveResolvers = [];
+        this.save().then((nextSuccess) => {
+          resolvers.forEach(cb => cb(nextSuccess));
+        });
+      }
     }
+
+    return success;
   }
 
   // Getters
@@ -158,7 +210,7 @@ export class SaveManager {
 
   // Mutation methods that trigger cloud save
   async unlockLevel(levelId: number): Promise<void> {
-    if (levelId > this.data.unlockedLevels) {
+    if (levelId > this.data.unlockedLevels && levelId <= 30) {
       this.data.unlockedLevels = levelId;
       await this.save();
     }
@@ -166,46 +218,55 @@ export class SaveManager {
 
   async addCoins(amount: number): Promise<void> {
     if (amount > 0) {
-      this.data.coins += amount;
+      this.data.coins += Math.floor(amount);
       await this.save();
     }
   }
 
   async spendCoins(amount: number): Promise<boolean> {
-    if (amount > 0 && this.data.coins >= amount) {
-      this.data.coins -= amount;
+    const cost = Math.floor(amount);
+    if (cost > 0 && this.data.coins >= cost) {
+      this.data.coins -= cost;
       await this.save();
       return true;
     }
     return false;
   }
 
-  async recordLevelCompletion(levelId: number, score: number, stars: number): Promise<boolean> {
+  /**
+   * Atomic record level victory: updates score, stars, level unlock, and coin reward in one atomic save
+   */
+  async recordLevelVictory(
+    levelId: number,
+    score: number,
+    stars: number,
+    coinsEarned: number
+  ): Promise<boolean> {
     let changed = false;
 
-    // Check high score
+    // High score check
     let isNewHighScore = false;
-    if (score > this.data.highScore) {
-      this.data.highScore = score;
+    const finalScore = Math.floor(score);
+    if (finalScore > this.data.highScore) {
+      this.data.highScore = finalScore;
       isNewHighScore = true;
       changed = true;
-      // Send top score to YouTube Playables engagement API
       this.adapter.sendScore(this.data.highScore).catch(err => {
         console.warn('[SaveManager] Failed to sendScore to YouTube:', err);
       });
     }
 
-    // Record stars if higher
+    // Stars
     const currentStars = this.data.stars[levelId] || 0;
     if (stars > currentStars) {
       this.data.stars[levelId] = stars;
       changed = true;
     }
 
-    // Record level score if higher
+    // Level score
     const currentScore = this.data.levelScores[levelId] || 0;
-    if (score > currentScore) {
-      this.data.levelScores[levelId] = score;
+    if (finalScore > currentScore) {
+      this.data.levelScores[levelId] = finalScore;
       changed = true;
     }
 
@@ -215,11 +276,21 @@ export class SaveManager {
       changed = true;
     }
 
+    // Coins
+    if (coinsEarned > 0) {
+      this.data.coins += Math.floor(coinsEarned);
+      changed = true;
+    }
+
     if (changed) {
       await this.save();
     }
 
     return isNewHighScore;
+  }
+
+  async recordLevelCompletion(levelId: number, score: number, stars: number): Promise<boolean> {
+    return this.recordLevelVictory(levelId, score, stars, 0);
   }
 
   async unlockSkin(skinId: string): Promise<void> {

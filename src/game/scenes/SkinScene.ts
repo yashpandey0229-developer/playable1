@@ -23,6 +23,7 @@ export class SkinScene extends Phaser.Scene {
   private statCapacityText!: Phaser.GameObjects.Text;
   private statFireRateText!: Phaser.GameObjects.Text;
   private statReloadText!: Phaser.GameObjects.Text;
+  private isActionPending = false;
 
   constructor() {
     super({ key: 'SkinScene' });
@@ -389,35 +390,42 @@ export class SkinScene extends Phaser.Scene {
   }
 
   private async handleActionClick(): Promise<void> {
+    if (this.isActionPending) return;
+
     const skin = WEAPON_SKINS[this.currentSkinIndex];
     const isUnlocked = this.skinManager.isSkinUnlocked(skin.id);
     const isEquipped = this.skinManager.getEquippedSkin().id === skin.id;
 
     if (isEquipped) return;
 
-    if (isUnlocked) {
-      this.audio.playClick();
-      await this.skinManager.equipSkin(skin.id);
-      this.updateSelectedSkinView();
-      return;
-    }
-
-    if (skin.unlockType === 'coins') {
-      const bought = await this.skinManager.purchaseWithCoins(skin);
-      if (bought) {
-        this.audio.playVictory();
+    this.isActionPending = true;
+    try {
+      if (isUnlocked) {
+        this.audio.playClick();
+        await this.skinManager.equipSkin(skin.id);
         this.updateSelectedSkinView();
-      } else {
-        this.audio.playDefeat();
+        return;
       }
-    } else if (skin.unlockType === 'ad') {
-      this.audio.playClick();
-      this.actionBtnLabel.setText('Loading Ad...');
-      const earned = await this.skinManager.unlockViaRewardedAd(skin);
-      if (earned) {
-        this.audio.playVictory();
+
+      if (skin.unlockType === 'coins') {
+        const bought = await this.skinManager.purchaseWithCoins(skin);
+        if (bought) {
+          this.audio.playVictory();
+          this.updateSelectedSkinView();
+        } else {
+          this.audio.playDefeat();
+        }
+      } else if (skin.unlockType === 'ad') {
+        this.audio.playClick();
+        this.actionBtnLabel.setText('Loading Ad...');
+        const earned = await this.skinManager.unlockViaRewardedAd(skin);
+        if (earned) {
+          this.audio.playVictory();
+        }
+        this.updateSelectedSkinView();
       }
-      this.updateSelectedSkinView();
+    } finally {
+      this.isActionPending = false;
     }
   }
 }

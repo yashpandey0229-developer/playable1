@@ -90,14 +90,15 @@ export class ResultsScene extends Phaser.Scene {
         earnedCoins += GAME_BALANCE.REWARDS.DAILY_CHALLENGE_COINS;
         const today = new Date().toISOString().split('T')[0];
         this.saveManager.recordDailyCompletion(today).catch(() => {});
+        this.saveManager.addCoins(earnedCoins).catch(() => {});
       } else {
-        this.saveManager.recordLevelCompletion(
+        this.saveManager.recordLevelVictory(
           this.resultsData.levelData.id,
           this.resultsData.score,
-          starsEarned
+          starsEarned,
+          earnedCoins
         ).catch(() => {});
       }
-      this.saveManager.addCoins(earnedCoins).catch(() => {});
     }
 
     // 5. Star Animations

@@ -12,16 +12,23 @@ export class MockPlayablesAdapter implements IPlayablesAdapter {
   private pauseListeners: Array<() => void> = [];
   private resumeListeners: Array<() => void> = [];
   private audioEnabled = true;
+  private hasCalledFirstFrame = false;
+  private hasCalledGameReady = false;
+  private isAdRequestPending = false;
 
   async init(): Promise<void> {
     console.info('[MockPlayablesAdapter] Initialized in development mode (in-memory mock).');
   }
 
   firstFrameReady(): void {
+    if (this.hasCalledFirstFrame) return;
+    this.hasCalledFirstFrame = true;
     console.info('[MockPlayablesAdapter] firstFrameReady() invoked.');
   }
 
   gameReady(): void {
+    if (this.hasCalledGameReady) return;
+    this.hasCalledGameReady = true;
     console.info('[MockPlayablesAdapter] gameReady() invoked.');
   }
 
@@ -97,7 +104,13 @@ export class MockPlayablesAdapter implements IPlayablesAdapter {
   }
 
   async requestRewardedAd(rewardId: string): Promise<boolean> {
+    if (this.isAdRequestPending) {
+      console.warn('[MockPlayablesAdapter] Rewarded ad request already in progress. Ignoring duplicate.');
+      return false;
+    }
+
     console.info(`[MockPlayablesAdapter] Rewarded ad requested for "${rewardId}". Opening interactive test modal.`);
+    this.isAdRequestPending = true;
 
     let modal = document.getElementById('dev-ad-modal');
     if (!modal) {
@@ -127,6 +140,7 @@ export class MockPlayablesAdapter implements IPlayablesAdapter {
     const msgElem = document.getElementById('dev-ad-message');
 
     if (!modal || !claimBtn || !cancelBtn || !timerElem) {
+      this.isAdRequestPending = false;
       // Fallback if modal DOM elements are missing
       return new Promise<boolean>(resolve => {
         const confirmClaim = window.confirm(`[Dev Mock Ad: ${rewardId}]\nClick OK to simulate watching ad to completion.\nClick Cancel to simulate abandoning ad.`);
@@ -163,6 +177,7 @@ export class MockPlayablesAdapter implements IPlayablesAdapter {
         modal.classList.add('hidden');
         claimBtn.onclick = null;
         cancelBtn.onclick = null;
+        this.isAdRequestPending = false;
       };
 
       claimBtn.onclick = () => {
