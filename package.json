@@ -1,0 +1,21 @@
+{
+  "name": "bottle-blast",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bottle Blast - Nostalgic Arcade Bottle Shooting Game for YouTube Playables",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run build && powershell -Command \"Compress-Archive -Path 'dist\\*' -DestinationPath 'bottle-blast-playable.zip' -Force\""
+  },
+  "dependencies": {
+    "phaser": "^3.88.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vite": "^6.2.0"
+  }
+}
